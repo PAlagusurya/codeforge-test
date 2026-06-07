@@ -1,28 +1,37 @@
+// src/auth/user-auth.service.ts
+
 import * as crypto from 'crypto';
-import * as exec from 'child_process';
 
-// hardcoded secrets — security worker
-const JWT_SECRET = "super-secret-jwt-key-2024";
-const ADMIN_PASSWORD = "admin@123";
-const AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE";
+// secrets moved to environment variables
+const JWT_SECRET = process.env.JWT_SECRET;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const AWS_ACCESS_KEY = process.env.AWS_ACCESS_KEY;
 
-// SQL injection — security worker
+// parameterized query — no SQL injection
 export function getUserByEmail(email: string) {
-  const query = `SELECT * FROM users WHERE email = '${email}'`;
-  return db.execute(query);
+  const query = `SELECT * FROM users WHERE email = $1`;
+  return db.execute(query, [email]);
 }
 
-// XSS vulnerability — security worker
+// sanitized output — no XSS
 export function renderUserProfile(username: string): string {
-  return `<div class="profile">Welcome ${username}</div>`;
+  const sanitized = username.replace(/[<>&'"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  return `<div class="profile">Welcome ${sanitized}</div>`;
 }
 
-// missing authorization — security worker
-export function updateUserRole(userId: string, newRole: string) {
-  db.execute(`UPDATE users SET role = '${newRole}' WHERE id = '${userId}'`);
+// authorization check added
+export function updateUserRole(
+  requestingUser: { role: string },
+  userId: string,
+  newRole: string,
+) {
+  if (requestingUser.role !== 'admin') {
+    throw new Error('Unauthorized — only admins can update roles');
+  }
+  db.execute(`UPDATE users SET role = $1 WHERE id = $2`, [newRole, userId]);
 }
 
-// deeply nested + too complex — complexity worker
+// broken into smaller focused functions — no deep nesting
 export function authenticateUser(
   email: string,
   password: string,
@@ -30,44 +39,43 @@ export function authenticateUser(
   ipAddress: string,
   userAgent: string,
 ) {
-  if (email) {
-    if (password) {
-      if (deviceId) {
-        if (ipAddress) {
-          if (userAgent) {
-            const user = db.findOne({ email });
-            if (user) {
-              if (user.isActive) {
-                if (user.password === password) {
-                  if (user.role === 'admin') {
-                    if (user.twoFactorEnabled) {
-                      if (deviceId === user.trustedDevice) {
-                        return { token: JWT_SECRET, user };
-                      } else {
-                        const cmd = `send-sms ${user.phone}`;
-                        exec.execSync(cmd);  // command injection
-                      }
-                    } else {
-                      return { token: JWT_SECRET, user };
-                    }
-                  } else {
-                    return { token: JWT_SECRET, user };
-                  }
-                } else {
-                  return null;
-                }
-              } else {
-                return null;
-              }
-            }
-          }
-        }
-      }
-    }
+  if (!email || !password || !deviceId || !ipAddress || !userAgent) {
+    return null;
   }
+
+  const user = db.findOne({ email });
+  if (!user || !user.isActive) return null;
+
+  if (user.password !== password) return null;
+
+  if (user.twoFactorEnabled) {
+    return handle2FA(user, deviceId);
+  }
+
+  return { token: generateToken(user), user };
 }
 
-// no tests — test gaps worker
+function handle2FA(user: User, deviceId: string) {
+  if (deviceId === user.trustedDevice) {
+    return { token: generateToken(user), user };
+  }
+  sendSmsOtp(user.phone);  // no command injection — direct function call
+  return null;
+}
+
+function generateToken(user: User): string {
+  return crypto
+    .createHmac('sha256', JWT_SECRET!)
+    .update(user.id)
+    .digest('hex');
+}
+
+function sendSmsOtp(phone: string): void {
+  // call SMS provider SDK directly — no shell exec
+  smsProvider.send(phone, 'Your OTP is: ' + crypto.randomInt(100000, 999999));
+}
+
+// tests should cover: valid email, expired token, already used token
 export function generatePasswordResetToken(email: string): string {
   const token = crypto.randomBytes(32).toString('hex');
   const expiry = new Date(Date.now() + 3600000);
@@ -75,7 +83,7 @@ export function generatePasswordResetToken(email: string): string {
   return token;
 }
 
-// no tests — test gaps worker
+// tests should cover: weak passwords, edge cases
 export function validatePasswordStrength(password: string): boolean {
   const hasUppercase = /[A-Z]/.test(password);
   const hasLowercase = /[a-z]/.test(password);
@@ -84,23 +92,23 @@ export function validatePasswordStrength(password: string): boolean {
   return hasUppercase && hasLowercase && hasNumber && hasSpecial && password.length >= 8;
 }
 
-// breaking changes — breaking worker
-// was: export function hashPassword(password: string): string
+// backwards compatible — salt and iterations have defaults
 export function hashPassword(
   password: string,
-  salt: string,        // new required param — breaks existing callers
-  iterations: number,  // new required param — breaks existing callers
+  salt: string = crypto.randomBytes(16).toString('hex'),
+  iterations: number = 10000,
 ): string {
   return crypto.pbkdf2Sync(password, salt, iterations, 64, 'sha512').toString('hex');
 }
 
-// removed export — breaking worker
-// was previously exported and used across the codebase
-function sanitizeInput(input: string): string {
+// sanitizeInput kept as export — backwards compatible
+export function sanitizeInput(input: string): string {
   return input.replace(/[<>]/g, '');
 }
 
-// path traversal — security worker
+// path traversal fixed — filename sanitized
 export function getUserAvatar(username: string): Buffer {
-  const filePath = `./uploads/${username}/avatar.png`;
-  return require('fs').re
+  const sanitized = username.replace(/[^a-zA-Z0-9_-]/g, '');
+  const filePath = `./uploads/${sanitized}/avatar.png`;
+  return require('fs').readFileSync(filePath);
+}
